@@ -1,8 +1,10 @@
 extern crate proc_macro;
 
-use proc_macro::TokenStream;
+use proc_macro::{Span, TokenStream};
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields};
+use syn::{
+    parse_macro_input, Data, DeriveInput, Fields, GenericArgument, Ident, PathArguments, Type,
+};
 
 #[proc_macro_derive(MergeCfg)]
 pub fn merge_cfg_derive(input: TokenStream) -> TokenStream {
@@ -18,10 +20,36 @@ pub fn merge_cfg_derive(input: TokenStream) -> TokenStream {
                     let field_name = field_ident.to_string();
                     let field_type = field.ty.clone();
                     // cast and set value
-                    merge_handle = quote! {
-                        #merge_handle
-                        #field_name => {
-                            self.#field_ident = kv[1].parse::<#field_type>().unwrap()
+                    match &field_type {
+                        // currently just support Vec<T>
+                        Type::Path(p) if p.path.segments.first().unwrap().ident.eq("Vec") => {
+                            if let PathArguments::AngleBracketed(generic_args) =
+                                &p.path.segments.first().unwrap().arguments
+                            {
+                                let args = &generic_args.args;
+                                if args.len().eq(&1) {
+                                    if let GenericArgument::Type(Type::Path(ap)) = &args[0] {
+                                        // get type string
+                                        let ty = ap.path.get_ident().unwrap().to_string();
+                                        // get type identity
+                                        let ty_ident = Ident::new(&ty, Span::call_site().into());
+                                        merge_handle = quote! {
+                                            #merge_handle
+                                            #field_name => {
+                                                self.#field_ident = v.iter().map(|s| s.parse::<#ty_ident>().unwrap()).collect()
+                                            }
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            merge_handle = quote! {
+                                #merge_handle
+                                #field_name => {
+                                    self.#field_ident = v.first().unwrap().parse::<#field_type>().unwrap()
+                                }
+                            };
                         }
                     };
                 }
@@ -36,17 +64,20 @@ pub fn merge_cfg_derive(input: TokenStream) -> TokenStream {
         impl #struct_ident {
             pub fn merge_cfg(&mut self) {
                 let args: Vec<String> = ::std::env::args().collect();
-                    if args.len() > 1 {
-                        for arg in args.iter().skip(1) {
-                            let kv: Vec<&str> = arg.split('=').collect();
-                            if kv.len() == 2 {
-                                match kv[0] {
-                                    #merge_handle
-                                    _ => {}
-                                }
-                            }
+                if args.len() > 1 {
+                    let mut map = ::std::collections::HashMap::<String, Vec<String>>::new();
+                    for arg in args.iter().skip(1) {
+                        if let Some((k, v)) = arg.split_once('=') {
+                            map.entry(k.to_string()).or_default().push(v.to_string());
                         }
                     }
+                    map.iter().for_each(|(k, v)| {
+                        match k.as_str() {
+                            #merge_handle
+                            _ => {},
+                        }
+                    });
+                }
             }
         }
     }
